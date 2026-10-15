@@ -2,20 +2,21 @@
 //  FpsPanel.m — 专业游戏监控悬浮窗（standalone 注入 dylib）
 //
 //  免越狱注入（Sideloadly / 证书直签 / LiveContainer+ElleKit 均可）。
-//  实现：直接挂载到游戏主窗口（keyWindow）上——Unity 悬浮窗插件标准做法，
-//        无独立 window，触摸天然分流：悬浮球/面板区域归悬浮窗，其余归游戏。
-//  功能：悬浮球可拖动、点击展开毛玻璃面板；FPS/延迟/CPU/内存/时钟实时监控；
-//        开关收纳在抽屉里，点右上角 ⚙️ 展开。
+//  实现：直接挂载到游戏主窗口（keyWindow）——Unity 悬浮窗插件标准做法。
+//  交互：悬浮球可拖动/点击开面板；面板固定不拖动（避免手势抢点击）；
+//        ⚙️ 展开/收起开关抽屉。
+//  数据：FPS / 延迟 / CPU / 内存 / 电量 / 机型 / 分辨率 / 日期时间。
 //  纯 ObjC Runtime + 公开 API，不依赖 Substrate/ElleKit。
 //
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <mach/mach.h>
 #import <mach/mach_time.h>
+#import <sys/sysctl.h>
 #import <objc/runtime.h>
 
 // ============================================================
-#pragma mark - 监控数据采集（FPS / CPU / 内存）
+#pragma mark - 监控数据采集
 // ============================================================
 
 @interface Metrics : NSObject
@@ -50,7 +51,7 @@
                                    userInfo:nil repeats:YES];
 }
 
-// ---- FPS：CADisplayLink 每秒计数 ----
+// ---- FPS ----
 - (void)onTick:(CADisplayLink *)dl {
     _frames++;
     NSTimeInterval now = CACurrentMediaTime();
@@ -62,14 +63,13 @@
     }
 }
 
-// ---- CPU：host_cpu_load_info 两次采样差值 ----
+// ---- CPU ----
 - (void)sampleCpu {
     host_cpu_load_info_data_t info;
     mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
     kern_return_t kr = host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO,
                                        (host_info_t)&info, &count);
     if (kr != KERN_SUCCESS) return;
-
     if (_hasPrevCpu) {
         natural_t du = info.cpu_ticks[CPU_STATE_USER]   - _prevCpu.cpu_ticks[CPU_STATE_USER];
         natural_t ds = info.cpu_ticks[CPU_STATE_SYSTEM] - _prevCpu.cpu_ticks[CPU_STATE_SYSTEM];
@@ -83,7 +83,7 @@
     _hasPrevCpu = YES;
 }
 
-// ---- 内存：TASK_VM_INFO phys_footprint ----
+// ---- 内存 ----
 - (float)memMB {
     task_vm_info_data_t vm;
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
@@ -92,10 +92,34 @@
     return (float)vm.phys_footprint / (1024.0f * 1024.0f);
 }
 
+// ---- 电量 ----
+- (float)batteryPercent {
+    [UIDevice currentDevice].batteryMonitoringEnabled = YES;
+    float lvl = [UIDevice currentDevice].batteryLevel;
+    if (lvl < 0) return -1;   // 模拟器/未知
+    return lvl * 100.0f;
+}
+
+// ---- 机型代号（iPhone11,8 等）----
+- (NSString *)deviceModel {
+    char buf[128];
+    size_t len = sizeof(buf);
+    if (sysctlbyname("hw.machine", buf, &len, NULL, 0) == 0)
+        return [NSString stringWithUTF8String:buf];
+    return @"unknown";
+}
+
+// ---- 分辨率（像素）----
+- (NSString *)screenRes {
+    CGSize s = [UIScreen mainScreen].bounds.size;
+    CGFloat sc = [UIScreen mainScreen].scale;
+    return [NSString stringWithFormat:@"%.0f×%.0f", s.width * sc, s.height * sc];
+}
+
 @end
 
 // ============================================================
-#pragma mark - 悬浮面板控制器（数据 + 抽屉开关）
+#pragma mark - 悬浮面板控制器（8 行数据 + 抽屉开关）
 // ============================================================
 
 @interface PanelView : UIView
@@ -103,11 +127,9 @@
 @end
 
 @implementation PanelView {
-    UILabel *_fpsVal, *_latVal, *_cpuVal, *_memVal, *_clockVal;
+    UILabel *_fpsVal, *_latVal, *_cpuVal, *_memVal, *_batVal, *_devVal, *_resVal, *_timeVal;
     UISwitch *_swFps, *_swCpu, *_swMem, *_swClock;
-    UIView *_drawer;      // 抽屉容器（默认隐藏）
-    BOOL _dragging;
-    CGPoint _dragStart;
+    UIView *_drawer;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -117,7 +139,6 @@
     return self;
 }
 
-// ---- 构建面板 ----
 - (void)build {
     CGFloat w = self.bounds.size.width;
 
@@ -131,37 +152,34 @@
     bg.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self addSubview:bg];
 
-    // 标题 + ⚙️ 按钮（右上角展开/收起抽屉）
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(14, 8, 180, 26)];
+    // 标题 + ⚙️
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(14, 10, 200, 24)];
     title.text = @"⚡ GAME PANEL";
     title.textColor = [UIColor colorWithRed:0.4f green:0.8f blue:1.0f alpha:1];
     title.font = [UIFont boldSystemFontOfSize:14];
     [self addSubview:title];
 
     UIButton *gear = [UIButton buttonWithType:UIButtonTypeCustom];
-    gear.frame = CGRectMake(w - 44, 6, 32, 32);
+    gear.frame = CGRectMake(w - 48, 6, 40, 40);   // 放大点击区域
     [gear setTitle:@"⚙" forState:UIControlStateNormal];
-    [gear setTitleColor:[UIColor colorWithWhite:1 alpha:0.85] forState:UIControlStateNormal];
-    gear.titleLabel.font = [UIFont systemFontOfSize:18];
+    [gear setTitleColor:[UIColor colorWithWhite:1 alpha:0.9] forState:UIControlStateNormal];
+    gear.titleLabel.font = [UIFont systemFontOfSize:20];
     [gear addTarget:self action:@selector(onGear:) forControlEvents:UIControlEventTouchUpInside];
     [self addSubview:gear];
 
-    // 监控数值行（上：数据）
+    // 8 行数据
     CGFloat y = 46;
-    _fpsVal = [self addMetricRow:y     title:@"FPS"   unit:@""];
-    _latVal = [self addMetricRow:y+30  title:@"延迟"  unit:@"ms"];
-    _cpuVal = [self addMetricRow:y+60  title:@"CPU"   unit:@"%"];
-    _memVal = [self addMetricRow:y+90  title:@"内存"  unit:@"MB"];
+    _fpsVal = [self addMetricRow:y      title:@"FPS"    unit:@""];
+    _latVal = [self addMetricRow:y+30   title:@"延迟"   unit:@"ms"];
+    _cpuVal = [self addMetricRow:y+60   title:@"CPU"    unit:@"%"];
+    _memVal = [self addMetricRow:y+90   title:@"内存"   unit:@"MB"];
+    _batVal = [self addMetricRow:y+120  title:@"电量"   unit:@"%"];
+    _devVal = [self addMetricRow:y+150  title:@"机型"   unit:@""];
+    _resVal = [self addMetricRow:y+180  title:@"分辨率" unit:@""];
+    _timeVal = [self addMetricRow:y+210 title:@"时间"   unit:@""];
 
-    // 时钟
-    _clockVal = [self makeLabel:CGRectMake(14, y + 120, w - 28, 22)
-                           text:@"--:--:--"
-                          color:[UIColor colorWithWhite:1 alpha:0.55]
-                           font:[UIFont fontWithName:@"Menlo" size:12]];
-    [self addSubview:_clockVal];
-
-    // 抽屉（默认隐藏，点 ⚙️ 展开）——高度保证 4 个开关完整可见
-    _drawer = [[UIView alloc] initWithFrame:CGRectMake(0, y + 144, w, 158)];
+    // 抽屉（默认隐藏）
+    _drawer = [[UIView alloc] initWithFrame:CGRectMake(0, y + 244, w, 158)];
     _drawer.hidden = YES;
     [self addSubview:_drawer];
 
@@ -169,16 +187,11 @@
     line.backgroundColor = [UIColor colorWithWhite:1 alpha:0.15];
     [_drawer addSubview:line];
 
-    _swFps   = [self addSwitchRow:14    title:@"FPS 显示"];
-    _swCpu   = [self addSwitchRow:14+36 title:@"CPU 显示"];
-    _swMem   = [self addSwitchRow:14+72 title:@"内存 显示"];
-    _swClock = [self addSwitchRow:14+108 title:@"时钟 显示"];
+    _swFps   = [self addSwitchRow:14     title:@"FPS 显示"];
+    _swCpu   = [self addSwitchRow:14+36  title:@"CPU 显示"];
+    _swMem   = [self addSwitchRow:14+72  title:@"内存 显示"];
+    _swClock = [self addSwitchRow:14+108 title:@"时间 显示"];
     _swFps.on = _swCpu.on = _swMem.on = _swClock.on = YES;
-
-    // 整个面板都可拖动
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-                                   initWithTarget:self action:@selector(onPan:)];
-    [self addGestureRecognizer:pan];
 }
 
 // 一行指标
@@ -186,22 +199,22 @@
     UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, y, self.bounds.size.width, 28)];
     [self addSubview:row];
 
-    UILabel *name = [self makeLabel:CGRectMake(14, 4, 80, 20)
+    UILabel *name = [self makeLabel:CGRectMake(14, 4, 90, 20)
                                text:title
                               color:[UIColor colorWithWhite:1 alpha:0.65]
                                font:[UIFont systemFontOfSize:13]];
     [row addSubview:name];
 
-    UILabel *val = [self makeLabel:CGRectMake(self.bounds.size.width - 150, 4, 136, 20)
+    UILabel *val = [self makeLabel:CGRectMake(self.bounds.size.width - 170, 4, 156, 20)
                               text:@"--" unit:unit
                              color:[UIColor colorWithRed:0.3f green:1.0f blue:0.5f alpha:1]
-                              font:[UIFont fontWithName:@"Menlo" size:15]];
+                              font:[UIFont fontWithName:@"Menlo" size:14]];
     val.textAlignment = NSTextAlignmentRight;
     [row addSubview:val];
     return val;
 }
 
-// 一行开关（放抽屉里）
+// 一行开关
 - (UISwitch *)addSwitchRow:(CGFloat)y title:(NSString *)title {
     UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, y, self.bounds.size.width, 32)];
     [_drawer addSubview:row];
@@ -233,36 +246,17 @@
     return l;
 }
 
-// ---- ⚙️ 按钮：展开/收起抽屉 ----
+// ---- ⚙️ 展开/收起抽屉 ----
 - (void)onGear:(id)sender {
     _drawer.hidden = !_drawer.hidden;
 }
 
-// ---- 整个面板拖动 ----
-- (void)onPan:(UIPanGestureRecognizer *)g {
-    UIView *win = self.superview;
-    if (!win) return;
-    if (g.state == UIGestureRecognizerStateBegan) {
-        _dragging = YES;
-        _dragStart = [g locationInView:win];
-    } else if (g.state == UIGestureRecognizerStateChanged && _dragging) {
-        CGPoint p = [g locationInView:win];
-        CGPoint c = self.center;
-        c.x += p.x - _dragStart.x;
-        c.y += p.y - _dragStart.y;
-        self.center = c;
-        _dragStart = p;
-    } else if (g.state == UIGestureRecognizerStateEnded) {
-        _dragging = NO;
-    }
-}
-
-// ---- 开关切换 ----
+// ---- 开关 ----
 - (void)onSwitch:(UISwitch *)sw {
     if (sw == _swFps)   [self toggleRow:_fpsVal  on:sw.on];
     if (sw == _swCpu)   [self toggleRow:_cpuVal  on:sw.on];
     if (sw == _swMem)   [self toggleRow:_memVal  on:sw.on];
-    if (sw == _swClock) _clockVal.hidden = !sw.on;
+    if (sw == _swClock) _timeVal.hidden = !sw.on;
 }
 
 - (void)toggleRow:(UILabel *)val on:(BOOL)on {
@@ -270,7 +264,7 @@
     row.hidden = !on;
 }
 
-// ---- 刷新数值 ----
+// ---- 刷新 ----
 - (void)refreshWithMetrics:(Metrics *)m {
     if (m.fps > 0 && !_swFps.hidden && _swFps.on)
         _fpsVal.text = [NSString stringWithFormat:@"%.1f", m.fps];
@@ -278,9 +272,14 @@
     _cpuVal.text = [NSString stringWithFormat:@"%.1f %%", m.cpuUsage];
     _memVal.text = [NSString stringWithFormat:@"%.0f MB", [m memMB]];
 
+    float bat = [m batteryPercent];
+    _batVal.text = bat < 0 ? @"--" : [NSString stringWithFormat:@"%.0f %%", bat];
+    _devVal.text = [m deviceModel];
+    _resVal.text = [m screenRes];
+
     NSDateFormatter *df = [NSDateFormatter new];
-    df.dateFormat = @"HH:mm:ss";
-    _clockVal.text = [df stringFromDate:[NSDate date]];
+    df.dateFormat = @"MM-dd HH:mm:ss";
+    _timeVal.text = [df stringFromDate:[NSDate date]];
 }
 
 @end
@@ -300,7 +299,7 @@
     BOOL _panelShown;
 }
 
-// ---- 注入入口（+load 最早时机，等启动完成后挂载） ----
+// ---- 注入入口 ----
 + (void)load {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -327,13 +326,12 @@
 }
 
 - (void)setup {
-    // 挂载宿主：游戏主窗口（keyWindow 优先，退而取第一个窗口）
     _hostWindow = [UIApplication sharedApplication].keyWindow;
     if (!_hostWindow)
         _hostWindow = [UIApplication sharedApplication].windows.firstObject;
     if (!_hostWindow) return;
 
-    // 悬浮球（60x60 圆角，中央实时 FPS）
+    // 悬浮球（可拖可点）
     _ball = [UIButton buttonWithType:UIButtonTypeCustom];
     _ball.frame = CGRectMake(20, 120, 60, 60);
     _ball.layer.cornerRadius = 30;
@@ -346,21 +344,19 @@
     _ball.titleLabel.font = [UIFont boldSystemFontOfSize:13];
     [_ball addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
 
-    // 悬浮球也可拖动
     UIPanGestureRecognizer *ballPan = [[UIPanGestureRecognizer alloc]
                                        initWithTarget:self action:@selector(ballDragged:)];
     [_ball addGestureRecognizer:ballPan];
 
     [_hostWindow addSubview:_ball];
 
-    // 面板（默认收起，点悬浮球展开）—— 高 360，抽屉展开后 4 开关完整可见
-    _panelWrap = [[UIView alloc] initWithFrame:CGRectMake(16, 160, 300, 360)];
+    // 面板（固定位置，不参与拖动；高 470 容纳 8 行数据 + 抽屉）
+    _panelWrap = [[UIView alloc] initWithFrame:CGRectMake(16, 160, 300, 470)];
     _panelWrap.hidden = YES;
     _panel = [[PanelView alloc] initWithFrame:_panelWrap.bounds];
     [_panelWrap addSubview:_panel];
     [_hostWindow addSubview:_panelWrap];
 
-    // 每秒刷新一次监控数值
     [[Metrics shared] start];
     [NSTimer scheduledTimerWithTimeInterval:0.5 target:self
                                    selector:@selector(refresh)
@@ -369,7 +365,6 @@
 
 - (void)refresh {
     [_panel refreshWithMetrics:[Metrics shared]];
-    // 悬浮球上显示实时 FPS
     Metrics *m = [Metrics shared];
     if (m.fps > 0)
         [_ball setTitle:[NSString stringWithFormat:@"%.0f", m.fps] forState:UIControlStateNormal];

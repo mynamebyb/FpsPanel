@@ -22,15 +22,11 @@
 
 @implementation PassthroughView
 
-// 只响应"子视图覆盖到的区域"（悬浮球 / 面板），其余触摸穿透给下层 window
-- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    for (UIView *sub in self.subviews) {
-        if (sub.hidden) continue;
-        if (!sub.userInteractionEnabled) continue;
-        if (CGRectContainsPoint(sub.frame, [self convertPoint:point toView:sub]))
-            return YES;
-    }
-    return NO;
+// 空白区域（没点中任何子视图）返回 nil → 触摸穿透给下层游戏；
+// 点中悬浮球/面板时正常返回子视图 → 悬浮窗可交互
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return (hit == self) ? nil : hit;
 }
 
 @end

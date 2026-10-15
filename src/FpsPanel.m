@@ -14,6 +14,28 @@
 #import <objc/runtime.h>
 
 // ============================================================
+#pragma mark - 触摸穿透视图（关键：不挡下层游戏操作）
+// ============================================================
+
+@interface PassthroughView : UIView
+@end
+
+@implementation PassthroughView
+
+// 只响应"子视图覆盖到的区域"（悬浮球 / 面板），其余触摸穿透给下层 window
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    for (UIView *sub in self.subviews) {
+        if (sub.hidden) continue;
+        if (!sub.userInteractionEnabled) continue;
+        if (CGRectContainsPoint(sub.frame, [self convertPoint:point toView:sub]))
+            return YES;
+    }
+    return NO;
+}
+
+@end
+
+// ============================================================
 #pragma mark - 监控数据采集（FPS / CPU / 内存）
 // ============================================================
 
@@ -321,6 +343,14 @@
     // 独立高等级窗口（不抢 key window）
     _window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     _window.windowLevel = UIWindowLevelStatusBar + 1;
+
+    // ★ iOS 要求启动结束时每个可见 window 必须有 rootViewController
+    // ★ 用 PassthroughView：只有悬浮球/面板区域吃触摸，其余穿透给游戏
+    UIViewController *rootVC = [UIViewController new];
+    PassthroughView *pv = [[PassthroughView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    pv.backgroundColor = [UIColor clearColor];
+    rootVC.view = pv;
+    _window.rootViewController = rootVC;
     _window.hidden = NO;
 
     // 悬浮球（60x60 圆角，中央实时 FPS）
@@ -341,14 +371,14 @@
                                        initWithTarget:self action:@selector(ballDragged:)];
     [_ball addGestureRecognizer:ballPan];
 
-    [_window addSubview:_ball];
+    [pv addSubview:_ball];
 
     // 面板（默认收起）
     _panelWrap = [[UIView alloc] initWithFrame:CGRectMake(16, 160, 300, 420)];
     _panelWrap.hidden = YES;
     _panel = [[PanelView alloc] initWithFrame:_panelWrap.bounds];
     [_panelWrap addSubview:_panel];
-    [_window addSubview:_panelWrap];
+    [pv addSubview:_panelWrap];
 
     // 每秒刷新一次监控数值
     [[Metrics shared] start];

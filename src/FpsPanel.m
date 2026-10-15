@@ -22,10 +22,13 @@
 
 @implementation OverlayWindow
 
-// 点中悬浮球/面板 → 正常返回子视图；空白区域 → 返回 nil → 触摸穿透给下层游戏
+// 命中 window 自己 或 全屏透明的 rootViewController.view（空白区域）→ 穿透给游戏；
+// 命中悬浮球/面板等子视图 → 正常响应
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    return (hit == self) ? nil : hit;
+    if (hit == self || hit == self.rootViewController.view)
+        return nil;
+    return hit;
 }
 
 @end

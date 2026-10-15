@@ -20,9 +20,9 @@
 @interface Metrics : NSObject
 @property (nonatomic, assign) float fps;
 @property (nonatomic, assign) float cpuUsage;
-@property (nonatomic, assign) float memMB;
 + (instancetype)shared;
 - (void)start;
+- (float)memMB;
 @end
 
 @implementation Metrics {

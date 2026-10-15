@@ -138,7 +138,6 @@
 }
 
 - (void)build {
-    CGFloat w = self.bounds.size.width;
 
     self.layer.cornerRadius = 18;
     self.layer.masksToBounds = YES;

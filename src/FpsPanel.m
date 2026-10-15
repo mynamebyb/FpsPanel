@@ -4,7 +4,7 @@
 //  免越狱注入（Sideloadly / 证书直签 / LiveContainer+ElleKit 均可）。
 //  功能：悬浮球可拖动，点击展开毛玻璃面板；
 //        实时显示 FPS / 帧延迟 / CPU / 内存 / 时间；
-//        每个显示项带独立开关（UISwitch）。
+//        开关收纳在抽屉里，点右上角 ⚙️ 展开。
 //  纯 ObjC Runtime + 公开 API，不依赖 Substrate/ElleKit。
 //
 #import <UIKit/UIKit.h>
@@ -14,16 +14,15 @@
 #import <objc/runtime.h>
 
 // ============================================================
-#pragma mark - 触摸穿透视图（关键：不挡下层游戏操作）
+#pragma mark - 悬浮窗窗口（关键：空白区域不拦截触摸，穿透给游戏）
 // ============================================================
 
-@interface PassthroughView : UIView
+@interface OverlayWindow : UIWindow
 @end
 
-@implementation PassthroughView
+@implementation OverlayWindow
 
-// 空白区域（没点中任何子视图）返回 nil → 触摸穿透给下层游戏；
-// 点中悬浮球/面板时正常返回子视图 → 悬浮窗可交互
+// 点中悬浮球/面板 → 正常返回子视图；空白区域 → 返回 nil → 触摸穿透给下层游戏
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
     return (hit == self) ? nil : hit;
@@ -112,7 +111,7 @@
 @end
 
 // ============================================================
-#pragma mark - 悬浮面板控制器
+#pragma mark - 悬浮面板控制器（数据 + 抽屉开关）
 // ============================================================
 
 @interface PanelView : UIView
@@ -122,7 +121,7 @@
 @implementation PanelView {
     UILabel *_fpsVal, *_latVal, *_cpuVal, *_memVal, *_clockVal;
     UISwitch *_swFps, *_swCpu, *_swMem, *_swClock;
-    UIView *_dragHandle;
+    UIView *_drawer;      // 抽屉容器（默认隐藏）
     BOOL _dragging;
     CGPoint _dragStart;
 }
@@ -134,8 +133,10 @@
     return self;
 }
 
-// ---- 构建毛玻璃面板 ----
+// ---- 构建面板 ----
 - (void)build {
+    CGFloat w = self.bounds.size.width;
+
     self.layer.cornerRadius = 18;
     self.layer.masksToBounds = YES;
 
@@ -146,56 +147,59 @@
     bg.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self addSubview:bg];
 
-    // 标题栏（可拖动）
-    _dragHandle = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.bounds.size.width, 40)];
-    _dragHandle.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [self addSubview:_dragHandle];
+    // 标题 + ⚙️ 按钮（右上角展开/收起抽屉）
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(14, 8, 180, 26)];
+    title.text = @"⚡ GAME PANEL";
+    title.textColor = [UIColor colorWithRed:0.4f green:0.8f blue:1.0f alpha:1];
+    title.font = [UIFont boldSystemFontOfSize:14];
+    [self addSubview:title];
 
-    UILabel *title = [self makeLabel:CGRectMake(14, 8, 200, 26)
-                                text:@"⚡ GAME PANEL"
-                               color:[UIColor colorWithRed:0.4f green:0.8f blue:1.0f alpha:1]
-                                font:[UIFont boldSystemFontOfSize:14]];
-    [_dragHandle addSubview:title];
+    UIButton *gear = [UIButton buttonWithType:UIButtonTypeCustom];
+    gear.frame = CGRectMake(w - 44, 6, 32, 32);
+    [gear setTitle:@"⚙" forState:UIControlStateNormal];
+    [gear setTitleColor:[UIColor colorWithWhite:1 alpha:0.85] forState:UIControlStateNormal];
+    gear.titleLabel.font = [UIFont systemFontOfSize:18];
+    [gear addTarget:self action:@selector(onGear:) forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:gear];
 
-    // 拖动手势
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-                                   initWithTarget:self action:@selector(onPan:)];
-    [_dragHandle addGestureRecognizer:pan];
-
-    // 监控数值行
+    // 监控数值行（上：数据）
     CGFloat y = 50;
-    _fpsVal  = [self addMetricRow:y    title:@"FPS"     unit:@""];
-    _latVal  = [self addMetricRow:y+32 title:@"延迟"     unit:@"ms"];
-    _cpuVal  = [self addMetricRow:y+64 title:@"CPU"     unit:@"%"];
-    _memVal  = [self addMetricRow:y+96 title:@"内存"     unit:@"MB"];
+    _fpsVal = [self addMetricRow:y     title:@"FPS"   unit:@""];
+    _latVal = [self addMetricRow:y+32  title:@"延迟"  unit:@"ms"];
+    _cpuVal = [self addMetricRow:y+64  title:@"CPU"   unit:@"%"];
+    _memVal = [self addMetricRow:y+96  title:@"内存"  unit:@"MB"];
 
-    // 分隔线
-    UIView *line = [[UIView alloc] initWithFrame:CGRectMake(14, y + 132, self.bounds.size.width - 28, 1)];
-    line.backgroundColor = [UIColor colorWithWhite:1 alpha:0.15];
-    [self addSubview:line];
-
-    // 开关行
-    _swFps   = [self addSwitchRow:y + 148 title:@"FPS 显示"];
-    _swCpu   = [self addSwitchRow:y + 180 title:@"CPU 显示"];
-    _swMem   = [self addSwitchRow:y + 212 title:@"内存 显示"];
-    _swClock = [self addSwitchRow:y + 244 title:@"时钟 显示"];
-    _swFps.on = _swCpu.on = _swMem.on = _swClock.on = YES;
-
-    // 时钟行
-    _clockVal = [self makeLabel:CGRectMake(14, y + 282, self.bounds.size.width - 28, 22)
-                            text:@"--:--:--"
-                           color:[UIColor colorWithWhite:1 alpha:0.55]
-                            font:[UIFont fontWithName:@"Menlo" size:12]];
+    // 时钟
+    _clockVal = [self makeLabel:CGRectMake(14, y + 130, w - 28, 22)
+                           text:@"--:--:--"
+                          color:[UIColor colorWithWhite:1 alpha:0.55]
+                           font:[UIFont fontWithName:@"Menlo" size:12]];
     [self addSubview:_clockVal];
 
-    self.frame = CGRectMake(self.frame.origin.x, self.frame.origin.y,
-                            self.frame.size.width, y + 320);
+    // 抽屉（默认隐藏，点 ⚙️ 展开）
+    _drawer = [[UIView alloc] initWithFrame:CGRectMake(0, y + 158, w, 150)];
+    _drawer.hidden = YES;
+    [self addSubview:_drawer];
+
+    UIView *line = [[UIView alloc] initWithFrame:CGRectMake(14, 0, w - 28, 1)];
+    line.backgroundColor = [UIColor colorWithWhite:1 alpha:0.15];
+    [_drawer addSubview:line];
+
+    _swFps   = [self addSwitchRow:14   title:@"FPS 显示"];
+    _swCpu   = [self addSwitchRow:14+36 title:@"CPU 显示"];
+    _swMem   = [self addSwitchRow:14+72 title:@"内存 显示"];
+    _swClock = [self addSwitchRow:14+108 title:@"时钟 显示"];
+    _swFps.on = _swCpu.on = _swMem.on = _swClock.on = YES;
+
+    // 整个面板都可拖动（标题栏 + 数据区任意位置）
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+                                   initWithTarget:self action:@selector(onPan:)];
+    [self addGestureRecognizer:pan];
 }
 
-// 一行指标：左侧名称 + 右侧等宽数值
+// 一行指标
 - (UILabel *)addMetricRow:(CGFloat)y title:(NSString *)title unit:(NSString *)unit {
     UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, y, self.bounds.size.width, 28)];
-    row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self addSubview:row];
 
     UILabel *name = [self makeLabel:CGRectMake(14, 4, 80, 20)
@@ -209,16 +213,14 @@
                              color:[UIColor colorWithRed:0.3f green:1.0f blue:0.5f alpha:1]
                               font:[UIFont fontWithName:@"Menlo" size:15]];
     val.textAlignment = NSTextAlignmentRight;
-    val.tag = 42;
     [row addSubview:val];
     return val;
 }
 
-// 一行开关
+// 一行开关（放抽屉里）
 - (UISwitch *)addSwitchRow:(CGFloat)y title:(NSString *)title {
     UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, y, self.bounds.size.width, 32)];
-    row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [self addSubview:row];
+    [_drawer addSubview:row];
 
     UILabel *name = [self makeLabel:CGRectMake(14, 6, 200, 20)
                                text:title
@@ -247,7 +249,12 @@
     return l;
 }
 
-// ---- 拖动 ----
+// ---- ⚙️ 按钮：展开/收起抽屉 ----
+- (void)onGear:(id)sender {
+    _drawer.hidden = !_drawer.hidden;
+}
+
+// ---- 整个面板拖动 ----
 - (void)onPan:(UIPanGestureRecognizer *)g {
     UIView *win = self.superview;
     if (!win) return;
@@ -336,16 +343,12 @@
 }
 
 - (void)setup {
-    // 独立高等级窗口（不抢 key window）
-    _window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    // 独立高等级窗口（不抢 key window），OverlayWindow 实现触摸穿透
+    _window = [[OverlayWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     _window.windowLevel = UIWindowLevelStatusBar + 1;
 
-    // ★ iOS 要求启动结束时每个可见 window 必须有 rootViewController
-    // ★ 用 PassthroughView：只有悬浮球/面板区域吃触摸，其余穿透给游戏
+    // 空 rootViewController（满足 iOS 启动断言）
     UIViewController *rootVC = [UIViewController new];
-    PassthroughView *pv = [[PassthroughView alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    pv.backgroundColor = [UIColor clearColor];
-    rootVC.view = pv;
     _window.rootViewController = rootVC;
     _window.hidden = NO;
 
@@ -367,14 +370,14 @@
                                        initWithTarget:self action:@selector(ballDragged:)];
     [_ball addGestureRecognizer:ballPan];
 
-    [pv addSubview:_ball];
+    [rootVC.view addSubview:_ball];
 
-    // 面板（默认收起）
-    _panelWrap = [[UIView alloc] initWithFrame:CGRectMake(16, 160, 300, 420)];
+    // 面板（默认收起，点悬浮球展开）
+    _panelWrap = [[UIView alloc] initWithFrame:CGRectMake(16, 160, 300, 320)];
     _panelWrap.hidden = YES;
     _panel = [[PanelView alloc] initWithFrame:_panelWrap.bounds];
     [_panelWrap addSubview:_panel];
-    [pv addSubview:_panelWrap];
+    [rootVC.view addSubview:_panelWrap];
 
     // 每秒刷新一次监控数值
     [[Metrics shared] start];

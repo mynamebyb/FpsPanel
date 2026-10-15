@@ -2,8 +2,9 @@
 //  FpsPanel.m — 专业游戏监控悬浮窗（standalone 注入 dylib）
 //
 //  免越狱注入（Sideloadly / 证书直签 / LiveContainer+ElleKit 均可）。
-//  功能：悬浮球可拖动，点击展开毛玻璃面板；
-//        实时显示 FPS / 帧延迟 / CPU / 内存 / 时间；
+//  实现：直接挂载到游戏主窗口（keyWindow）上——Unity 悬浮窗插件标准做法，
+//        无独立 window，触摸天然分流：悬浮球/面板区域归悬浮窗，其余归游戏。
+//  功能：悬浮球可拖动、点击展开毛玻璃面板；FPS/延迟/CPU/内存/时钟实时监控；
 //        开关收纳在抽屉里，点右上角 ⚙️ 展开。
 //  纯 ObjC Runtime + 公开 API，不依赖 Substrate/ElleKit。
 //
@@ -12,26 +13,6 @@
 #import <mach/mach.h>
 #import <mach/mach_time.h>
 #import <objc/runtime.h>
-
-// ============================================================
-#pragma mark - 悬浮窗窗口（关键：空白区域不拦截触摸，穿透给游戏）
-// ============================================================
-
-@interface OverlayWindow : UIWindow
-@end
-
-@implementation OverlayWindow
-
-// 命中 window 自己 或 全屏透明的 rootViewController.view（空白区域）→ 穿透给游戏；
-// 命中悬浮球/面板等子视图 → 正常响应
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit = [super hitTest:point withEvent:event];
-    if (hit == self || hit == self.rootViewController.view)
-        return nil;
-    return hit;
-}
-
-@end
 
 // ============================================================
 #pragma mark - 监控数据采集（FPS / CPU / 内存）
@@ -166,21 +147,21 @@
     [self addSubview:gear];
 
     // 监控数值行（上：数据）
-    CGFloat y = 50;
+    CGFloat y = 46;
     _fpsVal = [self addMetricRow:y     title:@"FPS"   unit:@""];
-    _latVal = [self addMetricRow:y+32  title:@"延迟"  unit:@"ms"];
-    _cpuVal = [self addMetricRow:y+64  title:@"CPU"   unit:@"%"];
-    _memVal = [self addMetricRow:y+96  title:@"内存"  unit:@"MB"];
+    _latVal = [self addMetricRow:y+30  title:@"延迟"  unit:@"ms"];
+    _cpuVal = [self addMetricRow:y+60  title:@"CPU"   unit:@"%"];
+    _memVal = [self addMetricRow:y+90  title:@"内存"  unit:@"MB"];
 
     // 时钟
-    _clockVal = [self makeLabel:CGRectMake(14, y + 130, w - 28, 22)
+    _clockVal = [self makeLabel:CGRectMake(14, y + 120, w - 28, 22)
                            text:@"--:--:--"
                           color:[UIColor colorWithWhite:1 alpha:0.55]
                            font:[UIFont fontWithName:@"Menlo" size:12]];
     [self addSubview:_clockVal];
 
-    // 抽屉（默认隐藏，点 ⚙️ 展开）
-    _drawer = [[UIView alloc] initWithFrame:CGRectMake(0, y + 158, w, 150)];
+    // 抽屉（默认隐藏，点 ⚙️ 展开）——高度保证 4 个开关完整可见
+    _drawer = [[UIView alloc] initWithFrame:CGRectMake(0, y + 144, w, 158)];
     _drawer.hidden = YES;
     [self addSubview:_drawer];
 
@@ -188,13 +169,13 @@
     line.backgroundColor = [UIColor colorWithWhite:1 alpha:0.15];
     [_drawer addSubview:line];
 
-    _swFps   = [self addSwitchRow:14   title:@"FPS 显示"];
+    _swFps   = [self addSwitchRow:14    title:@"FPS 显示"];
     _swCpu   = [self addSwitchRow:14+36 title:@"CPU 显示"];
     _swMem   = [self addSwitchRow:14+72 title:@"内存 显示"];
     _swClock = [self addSwitchRow:14+108 title:@"时钟 显示"];
     _swFps.on = _swCpu.on = _swMem.on = _swClock.on = YES;
 
-    // 整个面板都可拖动（标题栏 + 数据区任意位置）
+    // 整个面板都可拖动
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
                                    initWithTarget:self action:@selector(onPan:)];
     [self addGestureRecognizer:pan];
@@ -305,14 +286,14 @@
 @end
 
 // ============================================================
-#pragma mark - 总控制器：悬浮球 + 面板 + 窗口
+#pragma mark - 总控制器：悬浮球 + 面板（挂载到游戏主窗口）
 // ============================================================
 
 @interface FpsOverlay : NSObject
 @end
 
 @implementation FpsOverlay {
-    UIWindow *_window;
+    UIWindow *_hostWindow;
     UIButton *_ball;
     UIView *_panelWrap;
     PanelView *_panel;
@@ -346,14 +327,11 @@
 }
 
 - (void)setup {
-    // 独立高等级窗口（不抢 key window），OverlayWindow 实现触摸穿透
-    _window = [[OverlayWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    _window.windowLevel = UIWindowLevelStatusBar + 1;
-
-    // 空 rootViewController（满足 iOS 启动断言）
-    UIViewController *rootVC = [UIViewController new];
-    _window.rootViewController = rootVC;
-    _window.hidden = NO;
+    // 挂载宿主：游戏主窗口（keyWindow 优先，退而取第一个窗口）
+    _hostWindow = [UIApplication sharedApplication].keyWindow;
+    if (!_hostWindow)
+        _hostWindow = [UIApplication sharedApplication].windows.firstObject;
+    if (!_hostWindow) return;
 
     // 悬浮球（60x60 圆角，中央实时 FPS）
     _ball = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -373,14 +351,14 @@
                                        initWithTarget:self action:@selector(ballDragged:)];
     [_ball addGestureRecognizer:ballPan];
 
-    [rootVC.view addSubview:_ball];
+    [_hostWindow addSubview:_ball];
 
-    // 面板（默认收起，点悬浮球展开）
-    _panelWrap = [[UIView alloc] initWithFrame:CGRectMake(16, 160, 300, 320)];
+    // 面板（默认收起，点悬浮球展开）—— 高 360，抽屉展开后 4 开关完整可见
+    _panelWrap = [[UIView alloc] initWithFrame:CGRectMake(16, 160, 300, 360)];
     _panelWrap.hidden = YES;
     _panel = [[PanelView alloc] initWithFrame:_panelWrap.bounds];
     [_panelWrap addSubview:_panel];
-    [rootVC.view addSubview:_panelWrap];
+    [_hostWindow addSubview:_panelWrap];
 
     // 每秒刷新一次监控数值
     [[Metrics shared] start];
